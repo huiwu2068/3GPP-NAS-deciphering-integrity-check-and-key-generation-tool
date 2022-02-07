@@ -3,6 +3,7 @@ import tkinter
 from tkinter.filedialog import askopenfilename
 import threading
 import queue
+from tkinter.tix import INTEGER
 from Crypto.Hash import HMAC, SHA256, CMAC
 from Crypto.Cipher import AES
 import pyshark
@@ -17,7 +18,8 @@ from CryptoMobile.Milenage import Milenage
 #from CryptoMobile.CMAC import CMAC
 #from CryptoMobile.AES import AES_ECB, AES_CTL
 import configparser
-
+import socket
+import struct
 # import traceback
 import pysnow
 import pyzuc
@@ -31,50 +33,98 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 logging.basicConfig()
 logger = logging.getLogger(name="decipher")     # get logger instance .
+ngap_procedurecode_dict ={
+}
 
+nas_5gs_mm_message_dict ={
+#5GS mobility management messages
+'41':('Registration request','UL'),
+'42':('Registration accept','DL'),
+'43':('Registration complete','UL'),
+'44':('Registration reject','DL'),
+'45':('Deregistration request (UE originating)','DL'),
+'46':('Deregistration accept (UE originating)','DL'),
+'47':('Deregistration request (UE terminated)','DL'),
+'48':('Deregistration accept (UE terminated	','UL'),
+'4c':('Service request','UL'),
+'4d':('Service reject','DL'),
+'4e':('Service accept','DL'),
+'4f':('Control plane service request','UL'),
+'50':('Network slice-specific authentication command','DL'),
+'51':('Network slice-specific authentication complete','UL'),
+'52':('Network slice-specific authentication result','DL'),
+'54':('Configuration update command','DL'),
+'55':('Configuration update complete','UL'),
+'56':('Authentication request','DL'),
+'57':('Authentication response','UL'),
+'58':('Authentication reject','DL'),
+'59':('Authentication failure','UL'),
+'5a':('Authentication result','DL'),
+'5b':('Identity request','DL'),
+'5c':('Identity response','UL'),
+'5d':('Security mode command','DL'),
+'5e':('Security mode complete','UL'),
+'5f':('Security mode reject','UL'),
+'64':('5GMM status','BOTH'),
+'65':('Notification','DL'),
+'66':('Notification response','UL'),
+'67':('UL NAS transport','UL'),
+'68':('DL NAS transport','DL'),
+#5GS session management messages
+'c1':('PDU session establishment request','UL'),
+'c2':('PDU session establishment accept','DL'),
+'c3':('PDU session establishment reject','DL'),
+'c5':('PDU session authentication command','DL'),
+'c6':('PDU session authentication complete','UL'),
+'c7':('PDU session authentication result','DL'),
+'c9':('PDU session modification request','UL'),
+'ca':('PDU session modification reject','DL'),
+'cb':('PDU session modification command','DL'),
+'cc':('PDU session modification complete','UL'),
+'cd':('PDU session modification command reject','UL'),
+'d1':('PDU session release request','UL'),
+'d2':('PDU session release reject','DL'),
+'d3':('PDU session release command','DL'),
+'d4':('PDU session release complete','UL'),
+'d5':('5GSM status','BOTH')
+}
 class Ue:
-    def __init__(self,decrypt_suci=None, secret_key=None, op=None,nas_5gs_5g_tmsi=None):
-        self.decrypt_suci = decrypt_suci
-        self.key: bytes = secret_key            # bytes string.
-        self.op: bytes = op                            # bytes string.
-        self.nas_5gs_5g_tmsi = nas_5gs_5g_tmsi
+    def __init__(self,supi=None):
+        self.supi:bytes = supi
         self.ue_dict={}
+        if(supi != None):
+            self.ue_dict['supi'] = supi.decode('ascii')
+        else:
+            self.ue_dict['supi'] = None
+        self.key: bytes = None            # bytes string.
+        self.op: bytes = None             # bytes string.
+        self.nas_5gs_5g_tmsi: bytes = b''
+        self.nas_5gs_amf_id =  None
+    
+        self.ue_dict['downlink_nas_overflow'] = 0
+        self.ue_dict['uplink_nas_overflow'] = 0
+        self.ue_dict['encryption_algorithm_id'] = '0'
+        self.ue_dict['integrity_algorithm_id'] = '2'
 
     def SetIpInfo(self,gnb_ip,ran_ue_ngap_id, amf_ip,amf_ue_ngap_id=None):
-        self.gnb_ip = gnb_ip
-        self.ran_ue_ngap_id = ran_ue_ngap_id        
-        self.amf_ip = amf_ip 
-        self.amf_ue_ngap_id = amf_ue_ngap_id 
+        self.gnb_ip:str = gnb_ip
+        self.ran_ue_ngap_id:str = ran_ue_ngap_id        
+        self.amf_ip:str = amf_ip 
+        self.amf_ue_ngap_id:str = amf_ue_ngap_id 
 
-    def SetPlmnInfo(self,mcc,mnc,snn):
-        self.mcc = mcc
-        self.mnc = mnc        
-        self.snn = snn 
-
-    def read_config_Info(self,supi,op,key,nas_5gs_5g_tmsi,nas_down_overflow,nas_up_overflow,dec_algorithm_id=None,intg_algorithm_id=None):
-        self.supi = supi
-        if op is not None:
-            self.op: bytes = bytes.fromhex(op) 
-
-        if key is not None:     
-            self.key: bytes = bytes.fromhex(key)
-
-        if nas_5gs_5g_tmsi is not None:
-            self.nas_5gs_5g_tmsi: bytes = bytes.fromhex(nas_5gs_5g_tmsi)
-            
-        self.nas_down_overflow:int = int(nas_down_overflow)
-        self.nas_up_overflow:int = int(nas_up_overflow)
-
-        if dec_algorithm_id is not None:
-            self.dec_algorithm_id:str = dec_algorithm_id
-
-        if intg_algorithm_id is not None:
-            self.intg_algorithm_id:str = intg_algorithm_id
-
-
-class TSharkNotFoundException(Exception):
-    pass
-
+    def read_config_Info(self):
+        if 'supi' in self.ue_dict and self.ue_dict['supi']!=None:
+            self.supi:bytes = self.ue_dict['supi'].encode('ascii')
+        if 'nas_5gs_5g_tmsi' in self.ue_dict:
+            self.nas_5gs_5g_tmsi: bytes = bytes.fromhex(self.ue_dict['nas_5gs_5g_tmsi'])
+        if 'key' in self.ue_dict:
+            self.key: bytes = bytes.fromhex(self.ue_dict['key'])
+        if 'op' in self.ue_dict:
+            self.op: bytes = bytes.fromhex(self.ue_dict['op'])
+        if 'downlink_nas_overflow' in self.ue_dict:
+            self.ue_dict['downlink_nas_overflow'] = int(self.ue_dict['downlink_nas_overflow'])
+        if 'uplink_nas_overflow' in self.ue_dict:
+            self.ue_dict['uplink_nas_overflow'] =int(self.ue_dict['uplink_nas_overflow'])
 
 class Decryption:
     def __init__(self,decrypt_suci, private_key, secret_key,
@@ -122,30 +172,76 @@ class Decryption:
             ue.SetIpInfo(gnb_ip,ran_ue_ngap_id,amf_ip)
         return ue
 
-    def GetorCreateUe(self,supi=None,nas_5g_tmsi=None):
-        if supi is not None:
-            supi_found = False
-            for ue_temp in self.ue_list:
-                if ue_temp.supi == supi:
+    def copy_Ue_from_tempUe(self,ue,ue_temp):
+        ue.gnb_ip = ue_temp.gnb_ip
+        ue.ran_ue_ngap_id = ue_temp.ran_ue_ngap_id
+        ue.amf_ip = ue_temp.amf_ip
+        ue.amf_ue_ngap_id = ue_temp.amf_ue_ngap_id
+        if ue_temp.nas_5gs_5g_tmsi is not None:
+            ue.nas_5gs_5g_tmsi = ue_temp.nas_5gs_5g_tmsi
+        if ue_temp.nas_5gs_amf_id is not None:
+            ue.nas_5gs_amf_id = ue_temp.nas_5gs_amf_id
+        if 'mcc' in ue_temp.ue_dict:
+            ue.ue_dict['mcc'] = ue_temp.ue_dict['mcc']
+            ue.ue_dict['mnc'] = ue_temp.ue_dict['mnc']
+            ue.ue_dict['snn'] = ue_temp.ue_dict['snn']
+        if 'kseaf' in ue_temp.ue_dict:
+            ue.ue_dict['kseaf'] = ue_temp.ue_dict['kseaf']
+
+        if 'local_downlink_nas_count' in ue_temp.ue_dict:
+            ue.ue_dict['local_downlink_nas_count'] = ue_temp.ue_dict['local_downlink_nas_count']
+            ue.ue_dict['local_uplink_nas_count'] = ue_temp.ue_dict['local_uplink_nas_count']
+        return True
+
+    def merge_tempUe_to_Ue(self,ue_temp,service_req = False):
+        supi_found = False
+        if 'supi' in ue_temp.ue_dict and ue_temp.ue_dict['supi']!= None:
+            for ue in self.ue_list:
+                if ue_temp.ue_dict['supi'] == ue.ue_dict['supi']:
                     supi_found = True
-                    return ue_temp
-
+                    break
             if supi_found == False:
-                ue = Ue(supi)
-        elif nas_5g_tmsi is not None:
-            nas_5g_tmsi_found = False
-            for ue_temp in self.ue_list:
-                if ue_temp.nas_5g_tmsi == nas_5g_tmsi:
-                    nas_5g_tmsi_found = True
-                    return ue_temp
+                ue = Ue(ue_temp.ue_dict['supi'].encode('ascii'))
+                self.ue_list.append(ue)
+                #ue_temp is not added to ue_temp_list for default
+                supi_found = True
+        else:
+            for ue in self.ue_list: #supi in config file or The UE has been the network
+                if(ue_temp.nas_5gs_5g_tmsi == ue.nas_5gs_5g_tmsi):
+                    if(ue.nas_5gs_amf_id == None):#Simplify manual configuration files
+                        supi_found = True
+                    elif ((not service_req) and ue_temp.nas_5gs_amf_id == ue.nas_5gs_amf_id):
+                        supi_found = True
+                    elif service_req and (ue_temp.nas_5gs_amf_id&0x00FF) == (ue.nas_5gs_amf_id&0x00FF):
+                        supi_found = True
+                    break
+        if(supi_found):
+            self.copy_Ue_from_tempUe(ue,ue_temp)
+            return supi_found,ue
+        else:
+            return supi_found,None
 
-            for ue_temp in self.ue_temp_list:
-                if ue_temp.nas_5g_tmsi == nas_5g_tmsi:
-                    nas_5g_tmsi_found = True
-                    return ue_temp
-            if nas_5g_tmsi_found == False:
-                ue = Ue(nas_5g_tmsi=nas_5g_tmsi)
-        return ue
+    #The UE uses TMSI to repeatedly access the network, update and print the change of gnb ngap id
+    def merge_tempUe(self,ue_temp,service_req):
+        tmsi_found = False
+        ue = None
+        for ue in self.ue_temp_list:
+            if(ue_temp.nas_5gs_5g_tmsi == ue.nas_5gs_5g_tmsi):
+                if ((not service_req) and ue_temp.nas_5gs_amf_id == ue.nas_5gs_amf_id):
+                    tmsi_found = True
+                elif service_req and (ue_temp.nas_5gs_amf_id&0x00FF) == (ue.nas_5gs_amf_id&0x00FF):
+                    tmsi_found = True
+                break
+        if(tmsi_found):
+            logger.info(f"5g_tmsi:{ue_temp.nas_5gs_5g_tmsi.hex()},"
+                f"new ue ip:{socket.inet_ntoa(struct.pack('I',socket.htonl(int(ue_temp.gnb_ip,16))))},ngapid:{int(ue_temp.ran_ue_ngap_id,16)},"
+                f"old ue ip:{socket.inet_ntoa(struct.pack('I',socket.htonl(int(ue.gnb_ip,16))))},ngapid:{int(ue.ran_ue_ngap_id,16)}")
+            return tmsi_found,ue
+        else:
+            logger.info(f"5g_tmsi:{ue_temp.nas_5gs_5g_tmsi.hex()},"
+                f"new ue ip:{socket.inet_ntoa(struct.pack('I',socket.htonl(int(ue_temp.gnb_ip,16))))},ngapid:{int(ue_temp.ran_ue_ngap_id,16)},"
+                f"old ue none")
+            return tmsi_found,None
 
     def get_ue_for_ngap(self,gnb_ip,ran_ue_ngap_id):
         ue_found = False
@@ -191,7 +287,7 @@ class Decryption:
         if computed_mac == retrieved_mac:
             return res, ck, ik
         else:
-            logger.warning("mac failure! one authentication request message skipped!\n")
+            logger.warning("mac failure! one authentication request message skipped!")
             return None, None, None
 
     def get_tshark_path(self,tshark_path=None):
@@ -219,13 +315,31 @@ class Decryption:
 
     def process_reg_request(self,ue,packet):
         # add a new entry and use ran_ue_ngap_id as key in dictionary.
-        logger.info("start processing reg request.")
+        if(packet.nas_5gs_mm_message_type.raw_value == '5c'):
+            logger.info("identity response for GUTI attach")
+        else:
+            logger.info("---!!!---processing Registration request.---!!!---\n")
 
         if not hasattr(packet, 'nas_5gs_mm_type_id'):
             logger.warning(
                 f'mandatory IE type of ID missing in registrationReuqest or identity response.'
-                f'src IP:{ue.gnb_ip} skip this packet!\n')
+                f"gnb ip:{socket.inet_ntoa(struct.pack('I',socket.htonl(int(ue.gnb_ip,16))))} skip this packet!")
             return False
+        
+        if hasattr(packet, 'e212_mcc') and hasattr(packet, 'e212_mnc'):
+            try:
+                mcc = '0' * (3 - len(packet.e212_mcc.get_default_value())) + \
+                    packet.e212_mcc.get_default_value()
+                mnc = '0' * (3 - len(packet.e212_mnc.get_default_value())) + \
+                    packet.e212_mnc.get_default_value()
+                ue.ue_dict['mcc'] = mcc
+                ue.ue_dict['mnc'] = mnc
+                ue.ue_dict['snn'] = '5G:mnc' + mnc + '.mcc' + mcc + '.3gppnetwork.org'
+            except Exception as e:
+                    logger.error(f'error: encountered error with mcc/mnc of '
+                                f"gnb ip:{socket.inet_ntoa(struct.pack('I',socket.htonl(int(ue.gnb_ip,16))))} skip handling mcc/mnc!")
+                    return False
+
         # if ID type is SUCI:
         if packet.nas_5gs_mm_type_id == '1':
             if hasattr(packet, 'nas_pdu'):
@@ -234,6 +348,10 @@ class Decryption:
                     nas_pdu = packet.nas_pdu.raw_value
                     # if it's plain registration request message.
                     if nas_pdu.startswith('7e0041'):
+                        id_length = int(nas_pdu[8:12],16)
+                        suci:str = nas_pdu[12:12+id_length*2]
+                    # elif it's identity response during GUTI attach，security is 0
+                    if nas_pdu.startswith('7e005c'):
                         id_length = int(nas_pdu[8:12],16)
                         suci:str = nas_pdu[12:12+id_length*2]
                     # elif it's identity response during GUTI attach.
@@ -245,8 +363,8 @@ class Decryption:
                         suci: str = nas_pdu[24:24 + id_length * 2]
                     bcd_supi:str = ''   # BCD string of plain SUPI
                 except Exception as e:
-                    logger.error("failed to get SUCI content, operation aborted.\n")
-                    logger.error(f"the error info is :{str(e)} line:{sys._getframe().f_lineno}\n")
+                    logger.error("failed to get SUCI content, operation aborted.")
+                    logger.error(f"the error info is :{str(e)} line:{sys._getframe().f_lineno}")
                     return False
                 # if SUPI is IMSI format:
                 if suci[0] =='0':
@@ -303,8 +421,8 @@ class Decryption:
                             else:
                                 raise Exception('found mac tag mismatched.')
                         except Exception as e:
-                            logger.error("failed to decrypt SUCI based on profileA, operation aborted.\n")
-                            logger.error(f"the error info is :{str(e)} line:{sys._getframe().f_lineno}\n")
+                            logger.error("failed to decrypt SUCI based on profileA, operation aborted.")
+                            logger.error(f"the error info is :{str(e)} line:{sys._getframe().f_lineno}")
                             # traceback.print_exc(file=sys.stdout)
                             # traceback.print_stack(file=sys.stdout)
                             return False
@@ -363,8 +481,8 @@ class Decryption:
                             else:
                                 raise Exception('found mac tag mismatched.')
                         except Exception as e:
-                            logger.error("failed to decrypt SUCI, operation aborted.\n")
-                            logger.error(f"the error info is :{str(e)} line:{sys._getframe().f_lineno}\n")
+                            logger.error("failed to decrypt SUCI, operation aborted.")
+                            logger.error(f"the error info is :{str(e)} line:{sys._getframe().f_lineno}")
                             return False
                 # if SUPI is NAI format:
                 elif suci[0] =='1':
@@ -383,34 +501,21 @@ class Decryption:
                     else:
                         logger.warning(
                         f'supi is invalid.'
-                        f'bcd_supi:{bcd_supi} skip this packet!\n')
+                        f'bcd_supi:{bcd_supi} skip this packet!')
                         return False
                     supi = supi.replace('f', '')
-
                     ue.ue_dict['supi'] = supi
-                    self.ue_temp_list.remove(ue)
-                    self.ue_list.append(ue)
-
-            if hasattr(packet, 'e212_mcc') and hasattr(packet, 'e212_mnc'):
-                try:
-                    mcc = '0' * (3 - len(packet.e212_mcc.get_default_value())) + \
-                          packet.e212_mcc.get_default_value()
-                    mnc = '0' * (3 - len(packet.e212_mnc.get_default_value())) + \
-                          packet.e212_mnc.get_default_value()
-                    ue.ue_dict['mcc'] = mcc
-                    ue.ue_dict['mnc'] = mnc
-                    ue.ue_dict['snn'] = '5G:mnc' + mnc + '.mcc' + mcc + '.3gppnetwork.org'
-                except Exception as e:
-                    logger.error(f'error: encountered error with mcc/mnc of '
-                                   f'src IP:{ue.gnb_ip} skip handling mcc/mnc!\n')
-                    return False
+                    result,new_ue = self.merge_tempUe_to_Ue(ue)
+                    return result,new_ue
         # else if id type is GUTI:
         elif packet.nas_5gs_mm_type_id == '2':
-            ue.nas_5gs_5g_tmsi = packet.nas_5gs_5g_tmsi
-            ue.nas_5gs_amf_pointer = packet.nas_5gs_amf_pointer
-            ue.nas_5gs_amf_region_id = packet.nas_5gs_amf_region_id
-            ue.nas_5gs_amf_set_id = packet.nas_5gs_amf_set_id
-            pass
+            supi_found,new_ue = self.process_tmsi_id(ue,packet)
+            if(supi_found):
+                self.set_local_nas_count(new_ue,packet,direction=0)
+                self.process_nas_integrity(new_ue,packet,direction=0)
+                return True,new_ue
+            else:
+                return True,ue
         # else if ID type is IMEI:
         elif packet.nas_5gs_mm_type_id == '3':
             pass
@@ -427,8 +532,6 @@ class Decryption:
 
     def process_auth_request(self,ue,packet):
         # future question: how to tell whether it's AKA or EAP-AKA' challenge?
-        ran_ue_ngap_id = ue.ran_ue_ngap_id
-        gnb_ip = ue.ran_ue_ngap_id
         try:
             # below rand/autn/mac/amf/sqn are all binary strings.
             abba = bytes.fromhex(packet.nas_5gs_mm_abba_contents.raw_value)
@@ -444,19 +547,24 @@ class Decryption:
             ue.ue_dict['amf'] = amf
             ue.ue_dict['mac'] = mac
 
-            res, ck, ik = self.call_milenage(self.secret_key, self.OP, self.OPC,rand, autn, sqn_xor_ak, amf, mac)
+            if ue.op == None:
+                ue.op = self.OP
+            if ue.key == None:
+                ue.key = self.secret_key
+
+            res, ck, ik = self.call_milenage(ue.key, ue.op, self.OPC,rand, autn, sqn_xor_ak, amf, mac)
             if res is None:
                 logger.error(f'error generating res/ck/ik, skip packet : IP identification:,'
-                                   f'src IP:{ue.gnb_ip} \n')
+                            f"gnb ip:{socket.inet_ntoa(struct.pack('I',socket.htonl(int(ue.gnb_ip,16))))} ")
                 return False
-            logger.info('compute CK/IK from auth_request message successfully!\n')
+            logger.info('compute CK/IK from auth_request message successfully!')
 
 
             # get SNN from dict as bytes string.
             snn:bytes = ue.ue_dict['snn'].encode('ascii')
             if not snn :
                 logger.warning(f'error getting SNN for this UE, skip packet : IP identification: ,'
-                                   f'src IP:{ue.gnb_ip}\n ')
+                            f"gnb ip:{socket.inet_ntoa(struct.pack('I',socket.htonl(int(ue.gnb_ip,16))))}\n")
                 return False
                 
             # computing kausf
@@ -470,64 +578,66 @@ class Decryption:
             input_key = kausf
             kseaf = bytes.fromhex(HMAC.new(input_key, kseaf_input_string, SHA256).hexdigest())
             ue.ue_dict['kseaf'] = kseaf
-            logger.info(f'compute kseaf based on snn and CK/IK successfully!\n')
-            logger.info(f'ck:{ck.hex()}\n'
+            logger.info(f"supi:{ue.ue_dict['supi']},tmsi:{ue.nas_5gs_5g_tmsi.hex()},"
+                f"compute kseaf based on snn and CK/IK successfully!")
+            logger.info(f'\n'
             f'ck:{ck.hex()}\n'
             f'ik:{ik.hex()}\n'
             f'kausf_input_string:{kausf_input_string.hex()}\n' 
             f'kausf:{kausf.hex()}\n'
             f'kseaf_input_string:{kausf_input_string.hex()}\n' 
-            f'kseaf:{kseaf.hex()}\n')
+            f'kseaf:{kseaf.hex()}')
 
             # get SNN from dict as bytes string.
-            if 'supi' in ue.ue_dict:
+            '''todo；if 'supi' in ue.ue_dict and ue.ue_dict['supi']!= None:
                 supi:bytes = ue.ue_dict['supi'].encode('ascii')
-                supi_str= ue.ue_dict['supi']
                 # computing kamf
                 abba = b'\x00\x00'
                 kamf_input_string = b'\x6d' + supi + len(supi).to_bytes(2, byteorder='big') + abba + b'\x00\x02'
                 input_key = kseaf
                 kamf = bytes.fromhex(HMAC.new(input_key, kamf_input_string, SHA256).hexdigest())
                 ue.ue_dict['kamf'] = kamf
-                logger.info(f'compute Kamf based on supi and CK/IK successfully!\n')
-                logger.info(f'supi:{supi_str},kamf:{kamf}\n')
+                logger.info(f"supi:{ue.ue_dict['supi']},tmsi:{ue.nas_5gs_5g_tmsi.hex()},"
+                    f'compute Kamf based on supi and CK/IK successfully!\n'
+                    f"kamf:{kamf.hex()}")'''
             return True
 
         except Exception as e:
-            logger.error(f'error handling authentication vector \n')
-            logger.error(f'the error info is :{str(e)} line:{sys._getframe().f_lineno}\n')
+            logger.error(f'error handling authentication vector ')
+            logger.error(f'the error info is :{str(e)} line:{sys._getframe().f_lineno}')
             return False
 
     def process_securitymode_command(self,ue,packet):
         try:
             # get encryption algorithm from security mode command message.
-            algorithm_id = packet.nas_pdu.raw_value[20]
+            encryption_algorithm_id = packet.nas_pdu.raw_value[20]
 
             # get interity algorithm from security mode command message.
             integrity_algorithm_id = packet.nas_pdu.raw_value[21]
 
-            # if null encryption , exit and do nothing.
-            ue.ue_dict['algorithm_id'] = algorithm_id
-            ue.ue_dict['integrity_algorithm_id'] = integrity_algorithm_id
-
             # algorithm_id ='0' for null encryption, '1' for snow3G, '2' for 'AES', '3' for ZUC
-            #if algorithm_id == '0':
-            #    return False
+            ue.ue_dict['encryption_algorithm_id'] = encryption_algorithm_id
+            ue.ue_dict['integrity_algorithm_id'] = integrity_algorithm_id
+            if 'kseaf' not in ue.ue_dict or ue.ue_dict['kseaf']== None:
+                logger.info(f'kseaf not generation yet')
+                return False
+
             input_key = ue.ue_dict['kseaf']
-            if ('kamf' not in ue.ue_dict):
+            if 'supi' in ue.ue_dict and ue.ue_dict['supi']!= None:
                 supi:bytes = ue.ue_dict['supi'].encode('ascii')
-                supi_str= ue.ue_dict['supi']
                 # computing kamf
                 abba = b'\x00\x00'
                 kamf_input_string = b'\x6d' + supi + len(supi).to_bytes(2, byteorder='big') + abba + b'\x00\x02'
                 kamf = bytes.fromhex(HMAC.new(input_key, kamf_input_string, SHA256).hexdigest())
                 ue.ue_dict['kamf'] = kamf
-                logger.info(f'compute Kamf successfully!\n')
-                logger.info(f'kamf:{kamf},supi:{supi_str}\n')
-
+                logger.info(f'compute Kamf successfully!')
+                logger.info(f"supi:{ue.ue_dict['supi']},kamf:{kamf}")
+            else:
+                return False
+                
             algorithm_type_dist = b'\x01'   #type_id for nas_encryption_key
             input_string = b'\x69' + algorithm_type_dist + b'\x00\x01' + \
-                           bytes.fromhex('0'+algorithm_id) + b'\x00\x01'
+                           bytes.fromhex('0'+encryption_algorithm_id) + b'\x00\x01'
             input_key = ue.ue_dict['kamf']
             # cipher_key uses only last 128 bytes of HMAC output, the bytes string would be 32 bytes long
             # so get the last 16 bytes of bytes string only for cipher_key.
@@ -541,26 +651,26 @@ class Decryption:
 
             ue.ue_dict['cipher_key'] = cipher_key
             ue.ue_dict['integrity_key'] = integrity_key
-            logger.info("compute NasEnc and NasInt key successfully!\n")
+            logger.info("compute NasEnc and NasInt key successfully!")
             logger.info(f'Nas cipher key:{cipher_key.hex()}\n'
-            f'Nas integrity key:{integrity_key.hex()}\n')
+            f'Nas integrity key:{integrity_key.hex()}')
 
             return True
         except Exception as e:
-            logger.error(f'the error info is :{str(e)} line:{sys._getframe().f_lineno}\n')
+            logger.error(f'the error info is :{str(e)} line:{sys._getframe().f_lineno}')
             return False
 
-    def decipher_nas(self,ue,packet,direction):
+    def process_nas_decipher(self,ue,packet,direction):
         try:
             ran_ue_ngap_id= packet.ran_ue_ngap_id.raw_value
 
-            if 'supi' not in ue.ue_dict:
+            if 'supi' not in ue.ue_dict or ue.ue_dict['supi']==None:
                 return False
 
             if ('cipher_key' not in ue.ue_dict):
                 logger.warning(f'warning: no cipher key available for this UE found,'
                            f'skip packet : ran_ue_ngap_id: {ran_ue_ngap_id},'
-                           f'src IP:{ue.gnb_ip} \n')
+                           f"gnb ip:{socket.inet_ntoa(struct.pack('I',socket.htonl(int(ue.gnb_ip,16))))}")
                 return False
 
             if direction == 1:
@@ -587,8 +697,8 @@ class Decryption:
             first_byte_of_bearer_and_direction = (bearer<<3)|(direction<<2)
             plain_payload = None
             # if AES ciphering:
-            # algorithm_id = ue.ue_dict['algorithm_id']
-            if 'algorithm_id' in ue.ue_dict and ue.ue_dict['algorithm_id'] == '2' and count_for_ciphering is not None:
+            # algorithm_id = ue.ue_dict['encryption_algorithm_id']
+            if 'encryption_algorithm_id' in ue.ue_dict and ue.ue_dict['encryption_algorithm_id'] == '2' and count_for_ciphering is not None:
                 # counter_block for AES should be 16 bytes long binary string.
                 counter_block = count_for_ciphering.to_bytes(4,byteorder='big') + \
                                 first_byte_of_bearer_and_direction.to_bytes(1,byteorder='big') + \
@@ -596,26 +706,34 @@ class Decryption:
                 crypto = AES.new(cipher_key, mode=AES.MODE_CTR, nonce=counter_block[0:8],initial_value=counter_block[8:16])
                 plain_payload = crypto.decrypt(ciphered_payload)
             # elif snow3G algorithm:
-            elif ue.ue_dict['algorithm_id'] == '1' and count_for_ciphering is not None:
+            elif ue.ue_dict['encryption_algorithm_id'] == '1' and count_for_ciphering is not None:
                 plain_payload = pysnow.snow_f8(cipher_key, count_for_ciphering, bearer,
                                                direction, ciphered_payload, len(ciphered_payload)*8)
             # elif ZUC algorithm:
-            elif ue.ue_dict['algorithm_id'] == '3' and count_for_ciphering is not None:
+            elif ue.ue_dict['encryption_algorithm_id'] == '3' and count_for_ciphering is not None:
                 plain_payload = pyzuc.zuc_eea3(cipher_key, count_for_ciphering, bearer,
                                                direction, len(ciphered_payload) * 8, ciphered_payload)
             # end if
 
             if plain_payload and plain_payload.startswith(b'\x7e'):
                 self.buffer = self.buffer.replace(nas_pdu,outer_header+plain_payload)
+                #If the message is Registration accept, and the newly allocated 5G mobile identity is 5G-GUTI
+                if(plain_payload[2] == 0x42 and plain_payload[8] == 0x02):
+                    ue.nas_5gs_5g_tmsi = plain_payload[15:19]
+                    logger.info(f"supi:{ue.ue_dict['supi']},The updated value of 5g_tmsi:{ue.nas_5gs_5g_tmsi.hex()}, Nas message")
+                
+                nas_5gs_mm_message_str = nas_5gs_mm_message_dict[plain_payload[2].to_bytes(1,byteorder='big').hex()][0]
+                logger.info(f"After decipher nas,supi:{ue.ue_dict['supi']},5g-tmsi:{ue.nas_5gs_5g_tmsi.hex()}, NasMmMsgType:{nas_5gs_mm_message_str},"
+                    f"ran_ngap_id: {int(ue.ran_ue_ngap_id,16)},gnb ip:{socket.inet_ntoa(struct.pack('I',socket.htonl(int(ue.gnb_ip,16))))}")
                 return True
         except Exception as e:
-            logger.error(f'the error info is :{str(e)} line:{sys._getframe().f_lineno}\n')
+            logger.error(f'the error info is :{str(e)} line:{sys._getframe().f_lineno}')
             #traceback.print_exc(file=sys.stdout)
             #traceback.print_stack(file=sys.stdout)
 
         return False
 
-    def get_nas_count(self,ue,packet,direction):
+    def set_local_nas_count(self,ue,packet,direction):
         try:
             if not hasattr(packet,'nas_5gs_seq_no'):
                 return False
@@ -657,13 +775,13 @@ class Decryption:
             # end if
             return True
         except Exception as e:
-            logger.error(f'the error info is :{str(e)} line:{sys._getframe().f_lineno}\n')
+            logger.error(f'the error info is :{str(e)} line:{sys._getframe().f_lineno}')
 
         return False
 
-    def check_integrity_nas(self,ue,packet,direction):
+    def process_nas_integrity(self,ue,packet,direction):
         try:
-            if 'supi' not in ue.ue_dict:
+            if 'supi' not in ue.ue_dict or ue.ue_dict['supi']==None:
                 return False
             # save local_nas_count back to dict.
             if direction == 1:
@@ -672,7 +790,7 @@ class Decryption:
                 count_for_ciphering = ue.ue_dict['local_uplink_nas_count']
 
             if 'integrity_key' not in ue.ue_dict:
-                logger.info(f'check_integrity_nas No security algorithm yet\n')
+                logger.info(f'check_integrity_nas No integrity key yet')
                 return False
 
             integrity_key = ue.ue_dict['integrity_key']
@@ -694,8 +812,8 @@ class Decryption:
             first_byte_of_bearer_and_direction = (bearer<<3)|(direction<<2)
             #plain_payload = None
             # if AES ciphering:
-            # algorithm_id = ue.ue_dict['algorithm_id']
-            if 'algorithm_id' in ue.ue_dict and ue.ue_dict['integrity_algorithm_id'] == '2' and count_for_ciphering is not None:
+            # algorithm_id = ue.ue_dict['encryption_algorithm_id']
+            if 'encryption_algorithm_id' in ue.ue_dict and ue.ue_dict['integrity_algorithm_id'] == '2' and count_for_ciphering is not None:
                 # counter_block for AES should be 16 bytes long binary string.
                 counter_block = count_for_ciphering.to_bytes(4,byteorder='big') + \
                                 first_byte_of_bearer_and_direction.to_bytes(1,byteorder='big') + \
@@ -724,14 +842,14 @@ class Decryption:
             # end if
 
             if message_auth_code_rsp != message_auth_code_pdu:
-                logger.warning(f'ran_ngap_id: {ue.ran_ue_ngap_id},src IP:{ue.gnb_ip},'
-                    f'message auth failed\n')
+                logger.warning(f"ran_ngap_id: {int(ue.ran_ue_ngap_id,16)},gnb ip:{socket.inet_ntoa(struct.pack('I',socket.htonl(int(ue.gnb_ip,16))))},"
+                    f'message integrity check failed')
             else:
-                logger.info(f'ran_ngap_id: {ue.ran_ue_ngap_id},src IP:{ue.gnb_ip},'
-                    f'message auth success\n')
+                logger.info(f"ran_ngap_id: {int(ue.ran_ue_ngap_id,16)},gnb ip:{socket.inet_ntoa(struct.pack('I',socket.htonl(int(ue.gnb_ip,16))))},"
+                    f'message integrity check success')
             return True
         except Exception as e:
-            logger.error(f'the error info is :{str(e)} line:{sys._getframe().f_lineno}\n')
+            logger.error(f'the error info is :{str(e)} line:{sys._getframe().f_lineno}')
 
         return False
 
@@ -739,7 +857,7 @@ class Decryption:
         if self.file_location:
             file_name = self.file_location
         else:
-            logger.error("critical error: the pcap file doesn't exist!\n")
+            logger.error("critical error: the pcap file doesn't exist!")
             return False
         #
         #    file_name = None
@@ -752,11 +870,11 @@ class Decryption:
 
         # check if file exists, if not, exit program,else,define a new file name for filtered pcap file.
         if not os.path.exists(file_name):
-            logger.error("critical error: the pcap file doesn't exist!\n")
+            logger.error("critical error: the pcap file doesn't exist!")
             return False
 
         if not (file_name.upper().endswith('.PCAP') or file_name.upper().endswith('.CAP')):
-            logger.error("the input file must be ended with .pcap or .cap!\n")
+            logger.error("the input file must be ended with .pcap or .cap!")
             return False
 
         self.filtered_file_name = file_name.replace('.pcap', '').replace('.PCAP', '').replace('.CAP', '').replace('.cap', '')
@@ -765,17 +883,17 @@ class Decryption:
         tshark_path = self.get_tshark_path()
         if tshark_path is None:
             logger.error('fatal error: no tshark.exe from wireshark found in system, make sure you have'
-                              'wireshark installed, or manually specify the path of wireshark in GUI\n')
+                              'wireshark installed, or manually specify the path of wireshark in GUI')
             return False
         parameters = [tshark_path, '-r', '"'+file_name+'"', '-2', '-R', 'ngap', '-w', '"'+self.filtered_file_name+'"']
         parameters = ' '.join(parameters)
         tshark_process = subprocess.Popen(parameters)
         wait_count = 0
         while True:
-            logger.info(f'waiting for pcap filtered by ngap protocol,{wait_count} seconds passed.\n')
+            logger.info(f'waiting for pcap filtered by ngap protocol,{wait_count} seconds passed.')
             if wait_count > self.TIME_OUT_FILTER_PCAP:
                 logger.error('filter pcap by ngap timed out,please use a smaller pcap '
-                                  'instead or filter it by ngap manually before decrypting it!\n')
+                                  'instead or filter it by ngap manually before decrypting it!')
                 tshark_process.kill()
                 return False
             if tshark_process.poll() is not None:
@@ -784,10 +902,35 @@ class Decryption:
             else:
                 module_time_sleep(1)
                 wait_count += 1
+
+    def process_tmsi_id(self,ue,packet,service_req = False):
+        ue.nas_5gs_5g_tmsi = bytes.fromhex(packet.nas_5gs_5g_tmsi.raw_value)
+        #For service request, there is no amf region id
+        if hasattr(packet,'nas_5gs_amf_region_id'):
+            ue.nas_5gs_amf_id = int(packet.nas_5gs_amf_region_id)<<16|\
+                int(packet.nas_5gs_amf_set_id)<<10|\
+                int(packet.nas_5gs_amf_pointer)
+        else:
+            ue.nas_5gs_amf_id = int(packet.nas_5gs_amf_set_id)<<10|\
+                int(packet.nas_5gs_amf_pointer)
+
+        supi_found,new_ue = self.merge_tempUe_to_Ue(ue,service_req)
+        if(supi_found):
+            logger.info(f"supi:{new_ue.ue_dict['supi']},5g-tmsi:{new_ue.nas_5gs_5g_tmsi.hex()}, reg request with GUTI")
+            return supi_found, new_ue
+        else:
+            tmsi_found,old_ue = self.merge_tempUe(ue,service_req)
+            if(tmsi_found):
+                self.ue_temp_list.remove(old_ue)
+            self.ue_temp_list.append(ue)
+            return supi_found, ue
+         
+
     def process_service_req(self,ue,packet):
+        logger.info("---!!!---processing service request.---!!!---\n")
         ran_ue_ngap_id = ue.ran_ue_ngap_id
-        gnb_ip = ue.ran_ue_ngap_id
-        if hasattr(packet, 'e212_5gstai_mcc') and hasattr(packet, 'e212_5gstai_mnc'):
+        gnb_ip = ue.gnb_ip
+        if ('mcc' not in ue.ue_dict) and hasattr(packet, 'e212_5gstai_mcc') and hasattr(packet, 'e212_5gstai_mnc'):
             try:
                 mcc = '0' * (3 - len(packet.e212_5gstai_mcc.get_default_value())) + \
                       packet.e212_5gstai_mcc.get_default_value()
@@ -798,13 +941,41 @@ class Decryption:
                 ue.ue_dict['snn'] = '5G:mnc' + mnc + '.mcc' + mcc + '.3gppnetwork.org'
             except Exception as e:
                 logger.warning(f'error: encountered error with mcc/mnc of '
-                               f'src IP:{gnb_ip} skip handling mcc/mnc!\n')
+                               f"ue ngap id:{ran_ue_ngap_id},gnb IP:{socket.inet_ntoa(struct.pack('I',socket.htonl(gnb_ip)))} skip handling mcc/mnc!")
                 return False
+
+        if packet.nas_5gs_mm_type_id == '1':     
+            pass
+        # else if id type is GUTI:
+        elif packet.nas_5gs_mm_type_id == '2':
+            supi_found,new_ue = self.process_tmsi_id(ue,packet,True)
+            if(supi_found):
+                self.set_local_nas_count(new_ue,packet,direction=0)
+                return True,new_ue
+            else:
+                return True,ue
+        # else if ID type is IMEI:
+        elif packet.nas_5gs_mm_type_id == '3':
+            pass
+        # else if ID type is 5G-S-TMSI:
+        elif packet.nas_5gs_mm_type_id == '4':
+            supi_found,new_ue = self.process_tmsi_id(ue,packet,True)
+            if(supi_found):
+                self.set_local_nas_count(new_ue,packet,direction=0)
+                return True,new_ue
+            else:
+                return True,ue
+        # else if ID type is IMEISV:
+        elif packet.nas_5gs_mm_type_id == '5':
+            pass
+        # no identity
+        else:
+            return False
         return True
 
     def process_supi_invaild(self,ue_temp,packet,direction):
-        for ue_from_config in self.ue_list:
-            supi:bytes = ue_from_config.supi.encode('ascii')
+        for ue in self.ue_list:
+            supi:bytes = ue.supi
             # computing kamf
             abba = b'\x00\x00'
             kamf_input_string = b'\x6d' + supi + len(supi).to_bytes(2, byteorder='big') + abba + b'\x00\x02'
@@ -812,9 +983,16 @@ class Decryption:
             kamf = bytes.fromhex(HMAC.new(input_key, kamf_input_string, SHA256).hexdigest())
             #ue_temp.ue_dict['kamf'] = kamf
 
-            # get interigty algorithm from security mode command message.
-            integrity_algorithm_id = packet.nas_pdu.raw_value[21] 
-            
+            # get encryption algorithm from security mode command message.
+            encryption_algorithm_id = packet.nas_pdu.raw_value[20]
+
+            # get interity algorithm from security mode command message.
+            integrity_algorithm_id = packet.nas_pdu.raw_value[21]
+
+            # algorithm_id ='0' for null encryption, '1' for snow3G, '2' for 'AES', '3' for ZUC
+            ue.ue_dict['encryption_algorithm_id'] = encryption_algorithm_id
+            ue.ue_dict['integrity_algorithm_id'] = integrity_algorithm_id
+
             algorithm_type_interity_dist = b'\x02'   #type_id for nas interity_key
             input_string = b'\x69' + algorithm_type_interity_dist + b'\x00\x01' + \
                            bytes.fromhex('0'+integrity_algorithm_id) + b'\x00\x01'
@@ -822,7 +1000,10 @@ class Decryption:
 
             # save local_nas_count back to dict.
             msg_nas_seq_no = int(packet.nas_5gs_seq_no.raw_value,base=16)        # msg_nas_seq_no is integer.
-            count_for_ciphering = ue_from_config.nas_down_overflow*256 + msg_nas_seq_no
+            if direction == 1:
+                count_for_ciphering = ue.ue_dict['downlink_nas_overflow']*256 + msg_nas_seq_no
+            elif direction == 0:
+                count_for_ciphering = ue.ue_dict['uplink_nas_overflow']*256 + msg_nas_seq_no
 
             # whole nas pdu including the outer security header and mac
             if hasattr(packet,'nas_pdu'):
@@ -842,7 +1023,7 @@ class Decryption:
             first_byte_of_bearer_and_direction = (bearer<<3)|(direction<<2)
             #plain_payload = None
             # if AES ciphering:
-            # algorithm_id = ue.ue_dict['algorithm_id']
+            # algorithm_id = ue.ue_dict['encryption_algorithm_id']
             if integrity_algorithm_id == '2' and count_for_ciphering is not None:
                 # counter_block for AES should be 16 bytes long binary string.
                 counter_block = count_for_ciphering.to_bytes(4,byteorder='big') + \
@@ -870,36 +1051,91 @@ class Decryption:
             if message_auth_code_rsp != message_auth_code_pdu:
                 continue
             else:
-                logger.info(f'message auth success,Get supi from config file ,message type:{packet.nas_5gs_mm_message_type.raw_value}\n')
-                ue_temp.supi = ue_from_config.supi
-                ue_temp.op = ue_from_config.op
-                ue_temp.key = ue_from_config.key
-                ue_temp.nas_down_overflow = ue_from_config.nas_down_overflow
-                ue_temp.nas_up_overflow = ue_from_config.nas_up_overflow
-                ue_temp.ue_dict['kamf'] = kamf
-                ue_temp.ue_dict['supi'] = supi
-
-                self.ue_temp_list.remove(ue_temp)
-                self.ue_list.remove(ue_from_config)
-                self.ue_list.append(ue_temp)
-                return True
+                self.copy_Ue_from_tempUe(ue,ue_temp)
+                logger.info(f"supi:{ue.ue_dict['supi']},tmsi:{ue.nas_5gs_5g_tmsi.hex()}"
+                    f'message auth success,Get supi from config file ,message type:{packet.nas_5gs_mm_message_type.raw_value}')
+                return True,ue
         return False
 
-    def process_nas_message(self,packet,packet_layer_ngap,packet_number):
-        if not (hasattr(packet,'ip') and hasattr(packet.ip,'src') and hasattr(packet.ip,'dst')
-                and hasattr(packet,'ngap') and hasattr(packet_layer_ngap,'ran_ue_ngap_id')
-                and (hasattr(packet_layer_ngap,'nas_pdu') or hasattr(packet_layer_ngap,'pdusessionnas_pdu'))
-                and hasattr(packet_layer_ngap,'procedurecode')
-                and hasattr(packet_layer_ngap,'nas_5gs_security_header_type')):
-            logger.warning(f'error: one or more mandatory IE in packet {packet_number} is missing, skip this packet!\n')
+    def ue_info_logger(self,ue,packet_layer_ngap,packet_number):
+        try:
+            nas_5gs_mm_message_type = None
+            nas_5gs_mm_message_str = None
+            if hasattr(packet_layer_ngap,'nas_5gs_mm_message_type'): 
+                nas_5gs_mm_message_type = packet_layer_ngap.nas_5gs_mm_message_type.raw_value
+                nas_5gs_mm_message_str = nas_5gs_mm_message_dict[nas_5gs_mm_message_type][0]
+
+            logger.info(f'--- packet {packet_number} processing. ---')
+            logger.info(f"supi:{ue.ue_dict['supi']},5g-tmsi:{ue.nas_5gs_5g_tmsi.hex()}, NasMmMsgType:{nas_5gs_mm_message_str},"
+                f"ran_ngap_id: {int(ue.ran_ue_ngap_id,16)},gnb ip:{socket.inet_ntoa(struct.pack('I',socket.htonl(int(ue.gnb_ip,16))))}")
+        except Exception as e:
+            logger.warning(f'handling ue_info_logger, the error info is :{str(e)} line:{sys._getframe().f_lineno}')
+        return
+
+    def process_nas_security(self,ue,packet_layer_ngap,direction):
+        try:
+            if not (('snn' in ue.ue_dict) and ('supi' in ue.ue_dict)):
+                logger.info(
+                    f'no UE with supi record found in normal dict, skip this packet!')
+                return False
+
+            security_header_type = packet_layer_ngap.nas_5gs_security_header_type.raw_value
+
+            nas_5gs_mm_message_type = None
+            if hasattr(packet_layer_ngap, 'nas_5gs_mm_message_type'):
+                # if packet is authentication request,get rand,autn,abba,SQN,AK,MAC from message.
+                nas_5gs_mm_message_type =  packet_layer_ngap.nas_5gs_mm_message_type.raw_value
+
+            # if it's plain nas message:
+            if security_header_type == '0':
+                # if wireshark dissection for null encryption is enabled:
+                if nas_5gs_mm_message_type == '56':
+                    self.process_auth_request(ue,packet_layer_ngap)
+                logger.info(f'skip plain nas message packet.')
+            # if it's plain nas message but integrity enabled.
+            elif security_header_type == '1' or security_header_type == '3':
+                if nas_5gs_mm_message_type == '5d':
+                    # get the algorithm type, then compute KDF_ALGKEY. if algkey is 128 bits,
+                    # use the last 128 bits of 256 bits long algkey.
+                    if 'supi' in ue.ue_dict and ue.ue_dict['supi']!=None:
+                        self.process_securitymode_command(ue,packet_layer_ngap)
+                    else:
+                        result,ue = self.process_supi_invaild(ue,packet_layer_ngap,direction)
+                        if(result):
+                            #process_supi_invaild function just verify the supi context, no real copy
+                            self.process_securitymode_command(ue,packet_layer_ngap)
+                self.process_nas_integrity(ue,packet_layer_ngap, direction)
+            # elif it's ciphered and integrityed nas message.
+            elif security_header_type == '2' or security_header_type == '4':
+                # if packet is authentication request,get rand,autn,abba,SQN,AK,MAC from message.
+                if nas_5gs_mm_message_type == '56':
+                    #The authentication message itself is no longer decrypted and sanitized
+                    self.process_auth_request(ue,packet_layer_ngap)
+
+                self.process_nas_integrity(ue,packet_layer_ngap, direction)
+                # if null encryption, do nothing but continue for next packet.
+                if 'encryption_algorithm_id' in ue.ue_dict and ue.ue_dict['encryption_algorithm_id'] == '0':
+                    logger.info(f'skip deciphering packet due to null encryption algorithm.')
+                    return False
+                # otherwise, decipher packet.
+                if self.process_nas_decipher(ue,packet_layer_ngap,direction):
+                    logger.info(f'deciphering packet successfully!')
+                else:
+                    logger.error(f'deciphering packet failed')
+                # end if
+                return False
+        except Exception as e:
+            logger.error('failed to handle security nas message.')
+            logger.error(f'the error info is :{str(e)} line:{sys._getframe().f_lineno}')
             return False
-        else:
-            try:
-                ran_ue_ngap_id = packet_layer_ngap.ran_ue_ngap_id.raw_value
-            except Exception as e:
-                logger.warning(
-                    f'error: error handling ran_ue_ngap_id in {packet_number}, skip this packet!\n')
-                return True
+
+    def process_nas_message(self,packet,packet_layer_ngap,packet_number):
+        try:
+            ran_ue_ngap_id = packet_layer_ngap.ran_ue_ngap_id.raw_value
+        except Exception as e:
+            logger.warning(
+                f'error: error handling ran_ue_ngap_id in {packet_number}, skip this packet!')
+            return True
 
         # if procedurecode is "initialUEmessage"(0x0f),create new UE item in dictionary:
         if packet_layer_ngap.procedurecode.raw_value == '0f':
@@ -910,27 +1146,30 @@ class Decryption:
                 amf_ip = packet.ip.dst.raw_value
             except Exception as e:
                 logger.warning(
-                    f'error: error handling source/dest IP in {packet_number}, skip this packet!\n')
+                    f'error: error handling source/dest IP in {packet_number}, skip this packet!')
                 return False
             if not hasattr(packet_layer_ngap,'nas_5gs_mm_message_type'):
-                logger.warning(f'error: one or more mandatory IE in packet {packet_number} is missing, skip this packet!\n')
+                logger.warning(f'error: one or more mandatory IE in packet {packet_number} is missing, skip this packet!')
                 return False
             if amf_ip and (amf_ip not in self.amf_ip_list):
                 self.amf_ip_list.append(amf_ip)
 
+            #By default, ue info  is not added to ue_temp_list.
             ue = self.create_temp_ue(gnb_ip,ran_ue_ngap_id,amf_ip)
-            self.ue_temp_list.append(ue)
 
             # if message type is "registration request".
             if packet_layer_ngap.nas_5gs_mm_message_type.raw_value == '41':
-                self.process_reg_request(ue,packet_layer_ngap)
+                result,ue = self.process_reg_request(ue,packet_layer_ngap)
 
             # elif message type is "service request"
             elif packet_layer_ngap.nas_5gs_mm_message_type.raw_value == '4c':
                 # need further coding here.
-                self.process_service_req(ue,packet_layer_ngap)
-                pass
-
+                result,ue = self.process_service_req(ue,packet_layer_ngap)
+            
+            if(result):
+                self.ue_info_logger(ue,packet_layer_ngap,packet_number)
+                self.process_nas_security(ue,packet_layer_ngap,0)
+         
         # elif DownlinkNASTransport message.
         elif packet_layer_ngap.procedurecode.raw_value == '04' and packet.ip.src.raw_value in self.amf_ip_list:
             try:
@@ -938,79 +1177,34 @@ class Decryption:
                 amf_ip = packet.ip.src.raw_value
             except Exception as e:
                 logger.warning(
-                    f'error: error handling src/dst IP in {packet_number}, skip this packet!\n')
+                    f'error: error handling src/dst IP in {packet_number}, skip this packet!')
                 return False
-            # check if UE record in self.ue_dict had already been added.
-            # if not, skip this packet.
+
+            if amf_ip and (amf_ip not in self.amf_ip_list):
+                self.amf_ip_list.append(amf_ip)
 
             direction = 1
+
+            # check if UE record in self.ue_dict had already been added.
+            # if not, skip this packet.
             result,ue = self.get_ue_for_ngap(gnb_ip,ran_ue_ngap_id)
             if result == False:
                 result,ue = self.get_temp_ue_for_ngap(gnb_ip,ran_ue_ngap_id)
                 if result == False:
                     logger.warning(f'warning: no  available for this UE found,'
-                                f'DownlinkNASTransport skip packet, ran_ue_ngap_id: {ran_ue_ngap_id},src IP:{gnb_ip} \n')
+                                f"DownlinkNASTransport skip packet, ran_ue_ngap_id: {int(ran_ue_ngap_id,16)},gnb IP:{socket.inet_ntoa(struct.pack('I',socket.htonl(int(gnb_ip,16))))}")
                     return False
 
             # direction parameter for ciphering input, 0 for uplink and 1 for downlink.
- 
-            self.get_nas_count(ue,packet_layer_ngap,direction)
-
-            security_header_type = packet_layer_ngap.nas_5gs_security_header_type.raw_value
-            # if it's plain nas message:
-            if security_header_type == '0':
-                # if wireshark dissection for null encryption is enabled:
-                if hasattr(packet_layer_ngap, 'nas_5gs_mm_message_type'):
-                    # if packet is authentication request,get rand,autn,abba,SQN,AK,MAC from message.
-                    if packet_layer_ngap.nas_5gs_mm_message_type.raw_value == '56':
-                        if amf_ip and (amf_ip not in self.amf_ip_list):
-                            self.amf_ip_list.append(amf_ip)
-                        self.process_auth_request(ue,packet_layer_ngap)
-            # if it's plain nas message but integrity enabled.
-            elif security_header_type == '1' or security_header_type == '3':
-                try:
-                    if packet_layer_ngap.nas_pdu.raw_value[18:20] == '5d':
-                        if amf_ip and (amf_ip not in self.amf_ip_list):
-                            self.amf_ip_list.append(amf_ip)
-                        # get the algorithm type, then compute KDF_ALGKEY. if algkey is 128 bits,
-                        # use the last 128 bits of 256 bits long algkey.
-                        if 'supi' in ue.ue_dict:
-                            self.process_securitymode_command(ue,packet_layer_ngap)
-                            self.check_integrity_nas(ue,packet_layer_ngap, direction)
-                        else:
-                            if(self.process_supi_invaild(ue,packet_layer_ngap,direction)):
-                                #process_supi_invaild function just verify the supi context, no real copy
-                                self.process_securitymode_command(ue,packet_layer_ngap)
-                                self.check_integrity_nas(ue,packet_layer_ngap, direction)
-
-                except Exception as e:
-                    logger.error('failed to handle integrity enabled downlink message, probably securityModeCommand message.\n')
-                    logger.error(f'the error info is :{str(e)} line:{sys._getframe().f_lineno}\n')
-                    return False
-
-            # elif it's ciphered and integrityed nas message.
-            elif security_header_type == '2' or security_header_type == '4':
-                # if packet is authentication request,get rand,autn,abba,SQN,AK,MAC from message.
-                if hasattr(packet_layer_ngap,'nas_5gs_mm_message_type') and \
-                    packet_layer_ngap.nas_5gs_mm_message_type.raw_value == '56':
-                    if amf_ip and (amf_ip not in self.amf_ip_list):
-                        self.amf_ip_list.append(amf_ip)
-                    #The authentication message itself is no longer decrypted and sanitized
-                    return self.process_auth_request(ue,packet_layer_ngap)
-
-
-                self.check_integrity_nas(ue,packet_layer_ngap, direction)
-                # if null encryption, do nothing but continue for next packet.
-                if 'algorithm_id' in ue.ue_dict and ue.ue_dict['algorithm_id'] == '0':
-                    logger.info(f'skip packet {packet_number} due to null encryption.\n')
-                    return False
-                # otherwise, decipher packet.
-                if self.decipher_nas(ue,packet_layer_ngap,direction):
-                    logger.info(f'deciphering packet {packet_number} successfully!\n')
-                else:
-                    logger.error(f'deciphering packet {packet_number}\n')
-                # end if
-                return False
+            if hasattr(packet_layer_ngap,'nas_5gs_5g_tmsi'):
+                ue.nas_5gs_5g_tmsi = bytes.fromhex(packet_layer_ngap.nas_5gs_5g_tmsi.raw_value)
+                ue.nas_5gs_amf_id = int(packet_layer_ngap.nas_5gs_amf_region_id)<<16|\
+                    int(packet_layer_ngap.nas_5gs_amf_set_id)<<10|\
+                    int(packet_layer_ngap.nas_5gs_amf_pointer)
+            
+            self.ue_info_logger(ue,packet_layer_ngap,packet_number)
+            self.set_local_nas_count(ue,packet_layer_ngap,direction)
+            self.process_nas_security(ue,packet_layer_ngap,direction)
 
         # elif UPlinkNASTransport message.
         elif packet_layer_ngap.procedurecode.raw_value == '2e' and packet.ip.dst.raw_value in self.amf_ip_list:
@@ -1019,7 +1213,7 @@ class Decryption:
                 amf_ip = packet.ip.dst.raw_value
             except Exception as e:
                 logger.warning(
-                    f'error: error handling src/dst IP in {packet_number}, skip this packet!\n')
+                    f'error: error handling src/dst IP in {packet_number}, skip this packet!')
                 return False
 
             result,ue = self.get_ue_for_ngap(gnb_ip,ran_ue_ngap_id)
@@ -1027,48 +1221,22 @@ class Decryption:
                 result,ue = self.get_temp_ue_for_ngap(gnb_ip,ran_ue_ngap_id)
                 if result == False:
                     logger.error(f'finding matched UE record in dictionary'
-                    f' for packet#{packet_number}, skip this packet!\n')
+                    f' for packet#{packet_number}, skip this packet!')
                     return False
                     
             direction = 0
-            self.get_nas_count(ue,packet_layer_ngap,direction)
+            self.set_local_nas_count(ue,packet_layer_ngap,direction)
+
+            self.ue_info_logger(ue,packet_layer_ngap,packet_number)
 
             # if packet is "identity response for GUTI attach", handle it on priority before other handling.
             if hasattr(packet_layer_ngap,'nas_5gs_mm_message_type') and \
                     packet_layer_ngap.nas_5gs_mm_message_type.raw_value == '5c':
-                return self.process_reg_request(ue,packet_layer_ngap)
+                #todo return self.process_reg_request(ue,packet_layer_ngap)
+                self.process_reg_request(ue,packet_layer_ngap)
 
-            if not (('snn' in ue.ue_dict) and ('supi' in ue.ue_dict)):
-                logger.info(
-                    f'finding matched UE record in dictionary'
-                    f' for packet#{packet_number}, skip this packet!\n')
-                return False
-
-            security_header_type = packet_layer_ngap.nas_5gs_security_header_type.raw_value
-
-            if security_header_type != '0':
-                self.check_integrity_nas(ue,packet_layer_ngap, direction)
-
-            # if plain nas message:
-            if security_header_type == '0' or security_header_type == '1' or security_header_type == '3':
-                # if packet is authentication response:
-                if packet_layer_ngap.nas_5gs_mm_message_type.raw_value == '57':
-                    if amf_ip and (amf_ip not in self.amf_ip_list):
-                        self.amf_ip_list.append(amf_ip)
-
-            # elif it's ciphered nas message.
-            elif security_header_type == '2' or security_header_type == '4':
-                # if null encryption, do nothing but continue for next packet.
-                if 'algorithm_id' not in ue.ue_dict or ue.ue_dict['algorithm_id'] == '0':
-                    logger.info(f'skip packet {packet_number} due to null encryption.\n')
-                    return False
-                # otherwise, decipher packet.
-                if self.decipher_nas(ue,packet_layer_ngap, direction):
-                    logger.info(f'deciphering packet {packet_number} successfully!\n')
-                else:
-                    logger.error(f'error deciphering packet {packet_number}\n')
-                # end if
-                return False
+            return self.process_nas_security(ue,packet_layer_ngap,direction)
+            
         elif ((packet_layer_ngap.procedurecode.raw_value == '0e'#InitialContextSetupRequest
             or packet_layer_ngap.procedurecode.raw_value == '1d') #PDUSessionResourceSetupRequest
             and (packet.ip.src.raw_value in self.amf_ip_list)):
@@ -1077,7 +1245,7 @@ class Decryption:
                 amf_ip = packet.ip.src.raw_value
             except Exception as e:
                 logger.warning(
-                    f'error: error handling src/dst IP in {packet_number}, skip this packet!\n')
+                    f'error: error handling src/dst IP in {packet_number}, skip this packet!')
                 return False
             # check if UE record in self.ue_dict had already been added.
             # if not, skip this packet.
@@ -1085,69 +1253,52 @@ class Decryption:
             result,ue = self.get_ue_for_ngap(gnb_ip,ran_ue_ngap_id)
             if result == False:
                 logger.warning(f'error: error finding matched UE record in dictionary'
-                f' for packet#{packet_number}, skip this packet!\n')
+                f' for packet#{packet_number}, skip this packet!')
                 return False
 
             # direction parameter for ciphering input, 0 for uplink and 1 for downlink.
             direction = 1
-            self.get_nas_count(ue,packet_layer_ngap,direction)
+            self.set_local_nas_count(ue,packet_layer_ngap,direction)
+            self.ue_info_logger(ue,packet_layer_ngap,packet_number)
 
-            security_header_type = packet_layer_ngap.nas_5gs_security_header_type.raw_value
-            # if it's plain nas message but integrity enabled.
-            if security_header_type == '1' or security_header_type == '3':
-                try:
-                    self.check_integrity_nas(ue,packet_layer_ngap, direction)
-                except Exception as e:
-                    logger.error(f'failed to handle integrity enabled downlink message, probably securityModeCommand message.\n')
-                    logger.error(f'the error info is :{str(e)} line:{sys._getframe().f_lineno}\n')
-                    return False
+            if hasattr(packet_layer_ngap,'nas_5gs_5g_tmsi'):
+                ue.nas_5gs_5g_tmsi = bytes.fromhex(packet_layer_ngap.nas_5gs_5g_tmsi.raw_value)
+                ue.nas_5gs_amf_id = int(packet_layer_ngap.nas_5gs_amf_region_id)<<16|\
+                    int(packet_layer_ngap.nas_5gs_amf_set_id)<<10|\
+                    int(packet_layer_ngap.nas_5gs_amf_pointer)
 
-            # elif it's ciphered and integrityed nas message.
-            elif security_header_type == '2' or security_header_type == '4':
-                self.check_integrity_nas(ue,packet_layer_ngap, direction)
-                # if null encryption, do nothing but continue for next packet.
-                if 'algorithm_id' not in ue.ue_dict or ue.ue_dict['algorithm_id'] == '0':
-                    logger.info(f'type:{packet_layer_ngap.nas_5gs_mm_message_type.raw_value},skip packet {packet_number} due to null encryption.\n')
-                    return False
-                # otherwise, decipher packet.
-                if self.decipher_nas(ue,packet_layer_ngap,direction):
-                    logger.info(f'deciphering packet {packet_number} successfully!\n')
-                else:
-                    logger.error(f'error deciphering packet {packet_number}\n')
-                # end if
-                return False
+            self.process_nas_security(ue,packet_layer_ngap,direction)
         else:
             logger.error(f'packet {packet_number} not belongs to any of initialUE/uplinktransport/dlinktransport '
-                         f'skipped this packet!\n')
+                         f'skipped this packet!')
             return False
 
     def get_configfile(self):
         path = os.getcwd() + "\\3GPP_Security.ini"
         cp = configparser.ConfigParser()
-        ue_config_info = []
         try:
             cp.read(path,encoding="utf-8")
             for section in cp.sections():
                 ue = Ue()
-                item = cp.items(section)
-                ue.read_config_Info(item[0][1],item[1][1],item[2][1],item[3][1],item[4][1],item[5][1])
+                for item in cp.items(section):
+                    ue.ue_dict[item[0]] = item[1]
+                ue.read_config_Info()
                 self.ue_list.append(ue)
-            #options = cp.get("3GPP Decoder","wireshark_path")  # 获取某个section名为3GPP Decoder所对应的键
         except Exception as e:
             print(f'configfile error,e {str(e)}')
 
         return 
 
-    def main_test(self):
+    def main_function(self):
         if self.filter_pcap():
             logger.info("filter pcap by ngap protocol finished, now start dectypting!\n")
         else:
-            logger.error('error filtering pcap by ngap protocol, operation aborted!\n')
+            logger.error('error filtering pcap by ngap protocol, operation aborted!')
             return False
 
         # check if filtered_file_name generated by tshark successfully.
         if not os.path.exists(self.filtered_file_name):
-            logger.error(f'error: the file {self.filtered_file_name} seems not generated successfuly,operation aborted!\n')
+            logger.error(f'error: the file {self.filtered_file_name} seems not generated successfuly,operation aborted!')
             return False
         # real all contents inside filtered_file_name into buffer.
         with open(self.filtered_file_name, "rb") as file:
@@ -1183,11 +1334,11 @@ class Decryption:
         try:
             with open(self.filtered_file_name, "wb") as file:
                 file.write(self.buffer)
-            logger.info(f'file {self.filtered_file_name} with deciphered content created!\n')
+            logger.info(f'file {self.filtered_file_name} with deciphered content created!')
             del self.buffer,self.amf_ip_list
             return True
         except Exception as e:
-            logger.error("error happened during writing decrypted content into pcap, operation aborted!\n")
+            logger.error("error happened during writing decrypted content into pcap, operation aborted!")
             logger.debug(f"the error info is : {str(e)} line:{sys._getframe().f_lineno}")
             return False
             
@@ -1200,8 +1351,9 @@ class GuiPart:
     def __init__(self, master, _queue, end_command,start_decrypting):
         self.queue = _queue
         # Set up the GUI
-        master.geometry("850x550")
-        master.title("5G NAS deciphering tool")
+        # master is a main window
+        master.geometry("860x550")
+        master.title("3GPP NAS deciphering, integrity check and key generation tool")
 
         self.var_decrypt_suci = tkinter.IntVar()
         self.check_button = tkinter.Checkbutton(master, text="decrypt SUCI:", command=self.checkbutton_check,
@@ -1259,20 +1411,19 @@ class GuiPart:
         self.check_button_wireshark.grid(row=10, sticky=tkinter.E)
         self.entry_wireshark = tkinter.Entry(master, width=34)
         self.entry_wireshark.grid(row=10, column=1, sticky=tkinter.W)
-        #self.entry_wireshark.insert(0, r'D:\Program Files\Wireshark\tshark.exe')
         self.entry_wireshark.configure(state='disabled')
         tkinter.Button(master, text='    browse    ', command=self.locate_tshark).grid(row=10, column=2, sticky=tkinter.W)
 
-        tkinter.Button(master, text='decrypt pcap', command=start_decrypting).grid(row=11, column=1, sticky=tkinter.W)
+        tkinter.Button(master, text='Start decryption and integrity check pcap', command=start_decrypting).grid(row=11, column=1, sticky=tkinter.W)
         tkinter.Button(master, text='        Exit       ', command=end_command).grid(row=11, column=2, sticky=tkinter.W)
         self.scrollbar = tkinter.Scrollbar(master)
         self.scrollbar.grid(row=12, column=3, columnspan=14, sticky=tkinter.NS)
-        self.list_box = tkinter.Text(master, height=14, width=100, wrap=tkinter.WORD,yscrollcommand=self.scrollbar.set)
+        self.list_box = tkinter.Text(master, height=14, width=120, wrap=tkinter.WORD,yscrollcommand=self.scrollbar.set)
         self.scrollbar.config(command=self.list_box.yview)
         self.list_box.grid(row=12, column=0, columnspan=3, sticky=tkinter.W)
         self.list_box.insert(tkinter.END, 'real time log:')
         tkinter.Label(master, text=" ").grid(row=15, column=2, sticky=tkinter.E)
-        tkinter.Label(master, text="By J.T -2020").grid(row=16, column=2, sticky=tkinter.E)
+        tkinter.Label(master, text="By J.T -2020 and huiwu2068").grid(row=16, column=2, sticky=tkinter.E)
         master.protocol("WM_DELETE_WINDOW", end_command)
 
     def checkbutton_check(self):
@@ -1314,10 +1465,10 @@ class GuiPart:
                 # Check contents of message and do whatever is needed.
                 if msg:
                     if isinstance(msg,str):
-                        self.list_box.insert(tkinter.END, msg)
+                        self.list_box.insert(tkinter.END, msg+'\n')
                         self.list_box.yview(tkinter.END)
                     elif isinstance(msg,logging.LogRecord):
-                        self.list_box.insert(tkinter.END, msg.getMessage())
+                        self.list_box.insert(tkinter.END, msg.getMessage()+'\n')
                         self.list_box.yview(tkinter.END)
 
             except queue.Empty:
@@ -1371,11 +1522,11 @@ class GuiPart:
             if not (file_location and isinstance(file_location,str)):
                 raise Exception('file name error!')
 
-            logger.debug(f"GUI input is : {decrypt_suci, private_key, secret_key, use_op, op, opc, file_location,tshark_path}\n")
+            logger.debug(f"GUI input is : {decrypt_suci, private_key, secret_key, use_op, op, opc, file_location,tshark_path}")
             return decrypt_suci, private_key, secret_key, use_op, op, opc, file_location,tshark_path,new_bearer_id
         except Exception as e:
-            logger.error("error: one or more mandatory parameter input incorrect, please try again!\n")
-            logger.error(f'the error info is:{str(e)} line:{sys._getframe().f_lineno}\n')
+            logger.error("error: one or more mandatory parameter input incorrect, please try again!")
+            logger.error(f'the error info is:{str(e)} line:{sys._getframe().f_lineno}')
             return None, None, None, None, None, None, None
 
 
@@ -1385,20 +1536,20 @@ class ThreadedClient:
     endApplication could reside in the GUI part, but putting them here
     means that you have all the thread controls in a single place.
     """
-    def __init__(self, master):
+    def __init__(self, main_window):
         """
         Start the GUI and the asynchronous threads. We are in the main
         (original) thread of the application, which will later be used by
         the GUI as well. We spawn a new thread for decrypting.
         """
-        self.master = master
+        self.master = main_window
 
         # Create the queue
         self.queue = queue.Queue()
         # decryption object will be instantiated later by start_decrypting function.
-        self.decryption = None
+        self.decryption_and_integrity_check = None
         # Set up the GUI part
-        self.gui = GuiPart(master, self.queue, self.end_application, self.start_decrypting)
+        self.gui = GuiPart(main_window, self.queue, self.end_application, self.start_decryption_and_integrity_check)
         self.running = 1
         self.thread1 = None
         # Start the periodic call in the GUI to check if the queue contains
@@ -1437,14 +1588,14 @@ class ThreadedClient:
                 queue_handler.setFormatter(formatter)
                 queue_handler.setLevel(log_level)
                 logger.addHandler(queue_handler)
-                logger.debug("success with add queue handler.\n")
+                logger.debug("success with add queue handler.")
 
             logger.debug("log file is generated by file name:"+self.LOGFILE)
             return logger
         except Exception as e:
             print("initialize a new log file and writing into it failure,"
-                  " make sure your current account has write privilege to current directory!\n")
-            logger.error("error: " + str(e)+'\n')
+                  " make sure your current account has write privilege to current directory!")
+            logger.error("error: " + str(e)+'')
             return logger
 
     def periodic_call(self):
@@ -1454,32 +1605,32 @@ class ThreadedClient:
         self.gui.process_incoming()
         if not self.running:
             # do some cleanup before  shutting it down.
-            del self.gui,self.decryption
+            del self.gui,self.decryption_and_integrity_check
             sys.exit(1)
         self.master.after(200, self.periodic_call)
 
-    def start_decrypting(self):
+    def start_decryption_and_integrity_check(self):
         # Set up the thread to do decrypting.
         decrypt_suci, private_key, secret_key, use_op, op, opc, file_location, tshark_path,new_bearer_id = self.gui.get_gui_input()
         if secret_key is None or file_location is None:
-            logger.error("get input failed, abort decryption!\n")
+            logger.error("get input failed, abort decryption!")
             return False
 
-        self.decryption = Decryption(decrypt_suci, private_key, secret_key, use_op, op,
+        self.decryption_and_integrity_check = Decryption(decrypt_suci, private_key, secret_key, use_op, op,
                                      opc, file_location,self.queue,tshark_path,new_bearer_id)
-        self.thread1 = threading.Thread(target=self.decryption.main_test)
-        self.thread1.start()
+        self.decryption_and_integrity_check_thread = threading.Thread(target=self.decryption_and_integrity_check.main_function)
+        self.decryption_and_integrity_check_thread.start()
 
     def end_application(self):
         self.running = 0
         module_time_sleep(0.2)
-        del self.gui,self.decryption
+        del self.gui,self.decryption_and_integrity_check
         print("closing")
         sys.exit(1)
 
 
-root = tkinter.Tk()
-client = ThreadedClient(root)
-root.mainloop()
+main_window = tkinter.Tk()
+client = ThreadedClient(main_window)
+main_window.mainloop()
 
 
