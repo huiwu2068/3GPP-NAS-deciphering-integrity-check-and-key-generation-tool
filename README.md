@@ -3,6 +3,9 @@
 
 # Python dependencie
 pyshark: https://github.com/KimiNewt/pyshark/ Python wrapper for tshark, allowing python packet parsing using wireshark dissectors
+
 cryptography: https://github.com/pyca/cryptography a package which provides cryptographic recipes and primitives to Python developers
+
 CryptoMobile: https://github.com/mitshell/CryptoMobile python wrappers around 3G and LTE encryption and integrity protection algorithms
+
 Crypto: https://github.com/Legrandin/pycryptodome a self-contained Python package of low-level cryptographic primitives
